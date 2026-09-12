@@ -11,6 +11,7 @@ interface HubUser {
   nickname?: string;
   avatar_url?: string;
   profile_image?: string;
+  referral_code?: string;
   notification_settings?: any;
   registered_apps?: string[];
 }
@@ -74,6 +75,7 @@ export function HubProvider({ children, appId }: { children: React.ReactNode; ap
           email: session.email,
           nickname: session.nickname,
           avatar_url: session.avatar_url,
+          referral_code: session.referral_code,
           notification_settings: (session as any).notification_settings || {},
           registered_apps: (session as any).registered_apps || [],
         };
@@ -87,6 +89,9 @@ export function HubProvider({ children, appId }: { children: React.ReactNode; ap
           if (freshUser.email) {
             localStorage.setItem('userEmail', freshUser.email);
           }
+          if (freshUser.referral_code) {
+            localStorage.setItem('userReferralCode', freshUser.referral_code);
+          }
           window.dispatchEvent(new CustomEvent('merlinLoggedIn', { detail: freshUser }));
         }
         // 세션 확인 성공 시 잔액도 업데이트
@@ -99,6 +104,7 @@ export function HubProvider({ children, appId }: { children: React.ReactNode; ap
         if (typeof window !== 'undefined') {
           localStorage.removeItem('merlin_cached_user');
           localStorage.removeItem('merlin_cached_balance');
+          localStorage.removeItem('userReferralCode');
         }
       }
       // 일시적인 네트워크 오류(status 0, 502 등)일 때는 기존 캐시된 로그인 상태를 유지!
@@ -129,10 +135,24 @@ export function HubProvider({ children, appId }: { children: React.ReactNode; ap
 
   // 초기 로드 및 이벤트 리스너
   useEffect(() => {
-    // URL에서 ref(추천인 코드) 파라미터 파싱하여 로컬 스토리지에 저장
+    // 🚀 안드로이드 카카오톡 감지 시 크롬 외부 브라우저로 원활한 즉시 탈출 (세션 격리 및 PWA 설치 불가 원천 방지)
     if (typeof window !== 'undefined') {
+      const userAgent = navigator.userAgent || '';
+      const isAndroid = /Android/i.test(userAgent);
+      const isKakao = /KAKAOTALK|kakaowork/i.test(userAgent);
+      const hasEscaped = sessionStorage.getItem('kakaotalk_inapp_escaped');
+
+      if (isAndroid && isKakao && !hasEscaped) {
+        sessionStorage.setItem('kakaotalk_inapp_escaped', '1');
+        const cleanHost = window.location.host;
+        const cleanPath = window.location.pathname + window.location.search;
+        window.location.href = `intent://${cleanHost}${cleanPath}#Intent;scheme=https;package=com.android.chrome;end`;
+        return;
+      }
+
+      // URL에서 ref / r / referral (추천인 코드) 파라미터 파싱하여 로컬 스토리지에 저장
       const urlParams = new URLSearchParams(window.location.search);
-      const refCode = urlParams.get('ref');
+      const refCode = urlParams.get('ref') || urlParams.get('r') || urlParams.get('referral');
       if (refCode) {
         localStorage.setItem('pendingReferralCode', refCode);
         console.log('[HubProvider] Detected and saved pending referral code:', refCode);
@@ -209,7 +229,7 @@ export function HubProvider({ children, appId }: { children: React.ReactNode; ap
       setUser(null);
       setIsLoggedIn(false);
       setBalance(null);
-      clearSessionToken();
+      clearSessionToken('local');
       localStorage.removeItem('merlin_cached_user');
       localStorage.removeItem('merlin_cached_balance');
     };
@@ -227,8 +247,11 @@ export function HubProvider({ children, appId }: { children: React.ReactNode; ap
             refreshSession();
           }
         } else if (isLoggedIn) {
-          // 다른 탭에서 명시적으로 로그아웃되어 토큰이 소멸된 경우
-          handleSessionExpired();
+          // 🚨 Local Token Shield: 이 앱 자체의 로컬스토리지에 토큰이 살아있다면, 타 앱 로그아웃이나 쿠키 변동으로 세션을 죽이지 않음!
+          const localToken = typeof window !== 'undefined' ? localStorage.getItem('merlin_session_token') : null;
+          if (!localToken) {
+            handleSessionExpired();
+          }
         }
       }
     };
